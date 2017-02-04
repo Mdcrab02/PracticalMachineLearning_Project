@@ -1,0 +1,159 @@
+---
+title: "PML_Course_Project"
+author: "Mike Crabtree"
+date: "February 4, 2017"
+output: 
+  html_document:
+    keep_md: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+While some go about their days ignoring the intricacies of their movements, there are some who seek to quantify and study them.  In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants.  The goal of this project is to predict the manner in which they did the exercise.
+
+The data for this project can be found here:
+
+[http://groupware.les.inf.puc-rio.br/har](http://groupware.les.inf.puc-rio.br/har)
+
+## Preparing the Workspace
+```{r libraries, message=FALSE, warning=FALSE}
+library(caret)
+library(corrplot)
+library(randomForest)
+library(gbm)
+library(survival)
+library(splines)
+library(parallel)
+library(plyr)
+```
+
+```{r data}
+#Load up the two datasets. Both of them contain blanks that should be NA
+train <- read.csv("pml-training.csv", header = TRUE, na.strings = c("NA", ""))
+test <- read.csv("pml-testing.csv", header = TRUE, na.strings = c("NA", ""))
+```
+
+## Preprocessing the Data for Analysis
+
+Unfortunately, most of the features vectors in the train and test sets are filled with missing values and are of little value.
+
+```{r na_count}
+na_col_sums <- colSums(is.na(train))
+na_col_sums
+```
+
+## Cleaning the Data
+
+For purposes of keeping this project within the limits of the assignment, I am removing the feature vectors that contain missing values.
+
+```{r clean}
+train_rm_na <- train[, (colSums(is.na(train)) == 0)]
+test <- test[, (colSums(is.na(train)) == 0)]
+
+rm_cols <- grepl("X|user_name|timestamp|new_window", colnames(train_rm_na))
+
+train_rm_na <- train_rm_na[, !rm_cols]
+test_rm_na <- test[, !rm_cols]
+```
+
+
+## Creating New Training Set and Validation Set
+
+Now I am going to split the training data into a new training data set and a validation set.  Also stripping away the classes for each of the chosen examples.
+
+```{r split}
+index_train = createDataPartition(y = train_rm_na$classe, p = 0.7, list = FALSE)
+
+train_part = train_rm_na[index_train, ]
+valid_part = train_rm_na[-index_train, ]
+
+#Isolate the class vector from train_part to be attached to the PCA df later
+class <- train_part$classe
+```
+
+## Correlated Values
+
+Some of the variables contained within the data sets could be highly correlated and will influence the classification in undesired ways.  Create a correlation matrix to have a look at these variables and possible correlations.
+
+```{r corr}
+corr_matrix <- cor(train_part[, -54])
+corrplot(corr_matrix, order = "FPC", method = "color", type = "lower", tl.cex = 0.8, 
+         tl.col = rgb(0, 0, 0))
+```
+
+## Modeling
+
+Because this is a learning exercise and using different models might yield some interesting insights, I will be using a number of different models.  I have repeated cross validation set as an optional control method, but I am not sure my computer can compute it while I am still young even though I am using Microsoft R Open and 4 cores.  Also, I am going to use PCA to reduce the compute time for purposes of this assignment otherwise each model can take a minimum of 15 minutes to compute.
+
+```{r modeling}
+set.seed(123)
+fit_con <- trainControl(method = "cv", number = 5)
+fit_con_rep <- trainControl(method = "repeatedcv", number = 5, repeats = 2)
+
+#Use PCA to create fewer yet more complex predictors
+pca_df <- preProcess(train_part[, -54], method = "pca", thresh = 0.99)
+pca_train <- predict(pca_df, train_part[, -54])
+pca_test <- predict(pca_df, valid_part[, -54])
+# Create a new df and add the class variable to it for prediction
+new_pca <- pca_train
+new_pca$class <- class
+
+# Random Forest Model
+model_rf <- train(class ~ ., method = "rf", data = new_pca
+                  , trControl = fit_con, importance = TRUE)
+
+# Stochastic Gradient Boosting Model
+model_gbm <- train(class ~ ., data = new_pca, method = "gbm",
+                   trControl = fit_con, verbose = FALSE)
+```
+
+## PCA Component Importance
+
+From the random forest model, check the importance of each principle component in the classification process.
+
+```{r pca_imp}
+varImpPlot(model_rf$finalModel, sort = TRUE, type = 1, pch = 19, col = 1, cex = 1, 
+           main = "Importance of Principal Components")
+```
+
+It looks like a good number of them are powerful predictors.
+
+## Model Performance
+
+Look at the performance of each of the models.  For simplicity sake of the assignment I only use two.
+
+```{r model_perf}
+# Random Forest
+pred_rf <- predict(model_rf, pca_test)
+conf_matrix <- confusionMatrix(valid_part$classe, pred_rf)
+conf_matrix$table
+acc <- postResample(valid_part$classe, pred_rf)
+rf_acc <- acc[[1]]
+rf_oos <- 1 - rf_acc
+print(paste("The accuracy of the random forest is: ",rf_acc," and the out of sample error is: ",rf_oos))
+
+# GBM
+pred_gbm <- predict(model_gbm, pca_test)
+conf_matrix <- confusionMatrix(valid_part$classe, pred_gbm)
+conf_matrix$table
+acc <- postResample(valid_part$classe, pred_gbm)
+gbm_acc <- acc[[1]]
+gbm_oos <- 1 - gbm_acc
+print(paste("The accuracy of the random forest is: ",gbm_acc," and the out of sample error is: ",gbm_oos))
+```
+
+As expected, the random forest model's accuracy is higher, so I will stick with that throughout the rest of the project.
+
+## Testing Test Cases
+
+Now test the chosen model with a few test cases from the test set and see the predictions.
+
+```{r test_cases}
+pred_test <- predict(pca_df, test_rm_na[, -54])
+pred_final <- predict(model_rf, pred_test)
+pred_final
+```
